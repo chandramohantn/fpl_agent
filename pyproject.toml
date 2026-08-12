@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fpl-engine"
+version = "0.1.0"
+description = "FPL decision support system — data ingestion, prediction, and optimization"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx==0.27.0",
+    "pandas==2.2.2",
+    "polars==1.1.0",
+    "pydantic==2.8.2",
+    "pyarrow==17.0.0",
+    "aiofiles==24.1.0",
+    "tenacity==8.5.0",
+    "tqdm==4.66.4",
+    "beautifulsoup4==4.12.3",
+    "lxml==5.2.2",
+    "scikit-learn==1.5.1",
+    "lightgbm==4.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.2.2",
+    "pytest-asyncio==0.23.7",
+    "ruff==0.5.2",
+    "ipython==8.26.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/**" = ["E501", "F841"]  # Allow long lines and unused vars in Streamlit app
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

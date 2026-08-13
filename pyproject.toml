@@ -20,6 +20,7 @@ dependencies = [
     "lxml==5.2.2",
     "scikit-learn==1.5.1",
     "lightgbm==4.4.0",
+    "setuptools<74.0.0"
 ]
 
 [project.optional-dependencies]

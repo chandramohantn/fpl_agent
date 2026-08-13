@@ -335,5 +335,3 @@ graph LR
     SIM --> OPT
     OPT --> PLAN
 ```
-
-

@@ -1124,5 +1124,3 @@ The Data Foundation provides:
 4. **Granular xG data** — shot-level metrics for building better features than the FPL API alone provides
 
 Everything downstream depends on this layer being reliable, cached, and queryable.
-
-

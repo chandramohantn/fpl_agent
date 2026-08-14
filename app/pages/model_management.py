@@ -3,6 +3,44 @@
 from pathlib import Path
 
 import streamlit as st
+import yaml
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PIPELINE_CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline.yaml"
+
+
+def load_pipeline_config() -> tuple[dict[str, list[str]] | None, str | None]:
+    """Load pipeline season selections for display in the frontend."""
+    try:
+        with PIPELINE_CONFIG_PATH.open(encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+    except FileNotFoundError:
+        return None, f"Pipeline config not found: {PIPELINE_CONFIG_PATH}"
+    except yaml.YAMLError as exc:
+        return None, f"Invalid pipeline YAML: {exc}"
+
+    if not isinstance(config, dict):
+        return None, "Pipeline config must contain a YAML mapping."
+
+    selections = {}
+    for source in ("historical", "understat"):
+        seasons = config.get(source, {}).get("seasons")
+        if not isinstance(seasons, list) or not all(isinstance(season, str) for season in seasons):
+            return None, f"Invalid {source}.seasons configuration."
+        selections[source] = seasons
+
+    return selections, None
+
+
+def find_stored_seasons(domain_dir: Path) -> list[str]:
+    """Return season names from a partitioned Parquet domain."""
+    if not domain_dir.exists():
+        return []
+    return sorted(
+        directory.name.replace("season=", "")
+        for directory in domain_dir.iterdir()
+        if directory.is_dir() and directory.name.startswith("season=")
+    )
 
 
 def render():
@@ -123,8 +161,29 @@ def render():
     with tab3:
         st.subheader("Data Status")
 
-        data_dir = Path("data")
+        data_dir = PROJECT_ROOT / "data"
         processed_dir = data_dir / "processed"
+        pipeline_config, config_error = load_pipeline_config()
+
+        st.markdown("**Pipeline configuration:**")
+        if config_error:
+            st.warning(config_error)
+        else:
+            configured_data = {
+                "Source": ["Historical FPL", "Understat xG"],
+                "Configured seasons": [
+                    ", ".join(pipeline_config["historical"]),
+                    ", ".join(pipeline_config["understat"]),
+                ],
+                "Downloaded seasons": [
+                    ", ".join(find_stored_seasons(processed_dir / "gameweeks")) or "None",
+                    ", ".join(
+                        find_stored_seasons(processed_dir / "understat" / "players")
+                    )
+                    or "None",
+                ],
+            }
+            st.dataframe(configured_data, hide_index=True, use_container_width=True)
 
         if processed_dir.exists():
             st.markdown("**Processed data (Parquet store):**")
@@ -133,20 +192,13 @@ def render():
             for domain in domains:
                 domain_dir = processed_dir / domain
                 if domain_dir.exists():
-                    seasons = sorted(
-                        d.name.replace("season=", "")
-                        for d in domain_dir.iterdir()
-                        if d.is_dir() and d.name.startswith("season=")
-                    )
+                    seasons = find_stored_seasons(domain_dir)
                     st.markdown(f"- **{domain}:** {', '.join(seasons)}")
 
             # Understat
             us_dir = processed_dir / "understat" / "players"
             if us_dir.exists():
-                us_seasons = sorted(
-                    d.name.replace("season=", "")
-                    for d in us_dir.iterdir() if d.is_dir()
-                )
+                us_seasons = find_stored_seasons(us_dir)
                 st.markdown(f"- **Understat xG:** {', '.join(us_seasons)}")
 
             # FBref
@@ -174,5 +226,5 @@ def render():
             if st.button("🔄 Refresh Data (current season)"):
                 st.info("Run: `python scripts/refresh.py`")
         with col2:
-            if st.button("📥 Full Pipeline (all seasons)"):
+            if st.button("📥 Full Pipeline (configured seasons)"):
                 st.info("Run: `python scripts/run_pipeline.py`")

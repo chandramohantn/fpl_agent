@@ -1,9 +1,28 @@
 """Dashboard page — view predictions, squad, and recommendations."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 from fpl_engine.simulation.player_sim import PlayerPrediction, simulate_player_match_batch
+from fpl_engine.squad.manager import SQUAD_FILE
+
+SQUAD_SESSION_KEYS = (
+    "squad_predictions",
+    "player_names",
+    "player_prices",
+    "squad_budget",
+    "sim_results",
+    "player_contexts",
+    "squad_manager",
+)
+CURRENT_SEASON = "2026-27"
+SQUAD_BUDGET = 1000  # £100.0m, in FPL price units
+MAX_PER_CLUB = 3
+POSITION_QUOTAS = {1: 2, 2: 5, 3: 5, 4: 3}
+POSITION_NAMES = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def render():
@@ -20,13 +39,32 @@ def render():
         if "squad_predictions" not in st.session_state:
             st.info(
                 "No squad loaded. Go to **Planning** to set up your squad, "
-                "or load sample data below."
+                "or load a current-season sample squad below."
             )
-            if st.button("Load Sample Squad"):
-                _load_sample_squad()
-                st.rerun()
+            if st.button("Load Current-Season Sample Squad"):
+                try:
+                    _load_sample_squad()
+                except ValueError as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
         else:
             _render_squad_table()
+
+            with st.expander("Clear current squad"):
+                st.warning(
+                    "This removes the squad, simulations, manual player inputs, and saved squad state."
+                )
+                confirmed = st.checkbox(
+                    "I understand that this cannot be undone.",
+                    key="confirm_clear_squad",
+                )
+                st.button(
+                    "Clear squad",
+                    type="primary",
+                    disabled=not confirmed,
+                    on_click=_clear_current_squad,
+                )
 
     # ─── Tab 2: Simulations ──────────────────────────────────────────────
 
@@ -54,7 +92,7 @@ def render():
             st.info("Run simulations first (Simulations tab).")
 
 
-def _load_sample_squad():
+def _load_legacy_sample_squad():
     """Load a sample squad for demonstration.
 
     This represents a realistic £100m squad (15 players):
@@ -179,6 +217,174 @@ def _load_sample_squad():
     st.session_state["squad_budget"] = {"total": 1000, "spent": total_cost, "bank": bank}
 
 
+def _load_sample_squad():
+    """Load a legal 2026-27 sample from the current processed FPL data."""
+    predictions, names, prices, total_cost = _build_current_season_sample_squad()
+    st.session_state["squad_predictions"] = predictions
+    st.session_state["player_names"] = names
+    st.session_state["player_prices"] = prices
+    st.session_state["squad_budget"] = {
+        "total": SQUAD_BUDGET,
+        "spent": total_cost,
+        "bank": SQUAD_BUDGET - total_cost,
+    }
+
+
+def _build_current_season_sample_squad() -> tuple[
+    list[PlayerPrediction], dict[int, str], dict[int, int], int
+]:
+    """Build a legal, deterministic squad from the current FPL player pool."""
+    processed_dir = PROJECT_ROOT / "data" / "processed"
+    players_path = processed_dir / "players" / f"season={CURRENT_SEASON}" / "players.parquet"
+    teams_path = processed_dir / "teams" / f"season={CURRENT_SEASON}" / "teams.parquet"
+    fixtures_path = processed_dir / "fixtures" / f"season={CURRENT_SEASON}" / "fixtures.parquet"
+    if not all(path.exists() for path in (players_path, teams_path, fixtures_path)):
+        raise ValueError(
+            f"Current-season data for {CURRENT_SEASON} is missing. "
+            "Run `uv run python scripts/refresh.py` first."
+        )
+
+    players = pd.read_parquet(players_path).copy()
+    teams = pd.read_parquet(teams_path)
+    fixtures = pd.read_parquet(fixtures_path)
+    players["now_cost"] = pd.to_numeric(players["now_cost"], errors="coerce")
+    players["selection_score"] = (
+        pd.to_numeric(players["ep_next"], errors="coerce").fillna(0) * 5
+        + pd.to_numeric(players["points_per_game"], errors="coerce").fillna(0) * 2
+        + pd.to_numeric(players["form"], errors="coerce").fillna(0)
+    )
+    eligible = players[
+        players["can_select"].fillna(False)
+        & players["status"].eq("a")
+        & players["element_type"].isin(POSITION_QUOTAS)
+        & players["now_cost"].gt(0)
+    ].copy()
+
+    selected: list[dict] = []
+    team_counts: dict[int, int] = {}
+    for position, quota in POSITION_QUOTAS.items():
+        candidates = eligible[eligible["element_type"].eq(position)].sort_values(
+            ["now_cost", "selection_score", "id"], ascending=[True, False, True]
+        )
+        for player in candidates.to_dict("records"):
+            team_id = int(player["team"])
+            if team_counts.get(team_id, 0) >= MAX_PER_CLUB:
+                continue
+            selected.append(player)
+            team_counts[team_id] = team_counts.get(team_id, 0) + 1
+            if sum(p["element_type"] == position for p in selected) == quota:
+                break
+        if sum(p["element_type"] == position for p in selected) != quota:
+            raise ValueError(f"Could not find {quota} eligible {POSITION_NAMES[position]} players.")
+
+    _upgrade_squad_within_budget(selected, eligible, team_counts)
+    total_cost = int(sum(player["now_cost"] for player in selected))
+    if total_cost > SQUAD_BUDGET:
+        raise ValueError("Could not construct a sample squad within the £100.0m budget.")
+
+    team_names = dict(zip(teams["id"].astype(int), teams["name"], strict=True))
+    predictions = [_build_sample_prediction(player, fixtures, team_names) for player in selected]
+    names = {int(player["id"]): str(player["web_name"]) for player in selected}
+    prices = {int(player["id"]): int(player["now_cost"]) for player in selected}
+    return predictions, names, prices, total_cost
+
+
+def _upgrade_squad_within_budget(
+    selected: list[dict], eligible: pd.DataFrame, team_counts: dict[int, int]
+) -> None:
+    """Spend spare budget on higher-ranked players without breaking FPL constraints."""
+    while True:
+        total_cost = sum(player["now_cost"] for player in selected)
+        best_upgrade: tuple[float, int, dict] | None = None
+        for index, current in enumerate(selected):
+            selected_ids = {player["id"] for player in selected}
+            candidates = eligible[eligible["element_type"].eq(current["element_type"])]
+            for candidate in candidates.to_dict("records"):
+                if candidate["id"] in selected_ids:
+                    continue
+                extra_cost = candidate["now_cost"] - current["now_cost"]
+                score_gain = candidate["selection_score"] - current["selection_score"]
+                candidate_team = int(candidate["team"])
+                current_team = int(current["team"])
+                projected_team_count = team_counts.get(candidate_team, 0) - int(
+                    candidate_team == current_team
+                )
+                if (
+                    extra_cost <= 0
+                    or total_cost + extra_cost > SQUAD_BUDGET
+                    or score_gain <= 0
+                    or projected_team_count >= MAX_PER_CLUB
+                ):
+                    continue
+                value_gain = score_gain / extra_cost
+                if best_upgrade is None or value_gain > best_upgrade[0]:
+                    best_upgrade = (value_gain, index, candidate)
+        if best_upgrade is None:
+            return
+
+        _, index, replacement = best_upgrade
+        current = selected[index]
+        team_counts[int(current["team"])] -= 1
+        replacement_team = int(replacement["team"])
+        team_counts[replacement_team] = team_counts.get(replacement_team, 0) + 1
+        selected[index] = replacement
+
+
+def _build_sample_prediction(
+    player: dict, fixtures: pd.DataFrame, team_names: dict[int, str]
+) -> PlayerPrediction:
+    """Create a simple fixture-aware prediction for a real current-season player."""
+    team_id = int(player["team"])
+    upcoming = fixtures[
+        fixtures["event"].notna()
+        & ~fixtures["finished"]
+        & ((fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id))
+    ].sort_values(["event", "kickoff_time"])
+    if upcoming.empty:
+        opponent, is_home, difficulty = "TBC", True, 3
+    else:
+        fixture = upcoming.iloc[0]
+        is_home = int(fixture["team_h"]) == team_id
+        opponent_id = int(fixture["team_a"] if is_home else fixture["team_h"])
+        opponent = team_names.get(opponent_id, f"Team {opponent_id}")
+        difficulty = int(fixture["team_h_difficulty"] if is_home else fixture["team_a_difficulty"])
+
+    position = int(player["element_type"])
+    goal_rate = {1: 0.0, 2: 0.06, 3: 0.14, 4: 0.28}[position]
+    assist_rate = {1: 0.0, 2: 0.05, 3: 0.12, 4: 0.08}[position]
+    clean_sheet = max(0.08, min(0.45, 0.42 - 0.06 * (difficulty - 2)))
+    return PlayerPrediction(
+        element=int(player["id"]),
+        position=POSITION_NAMES[position],
+        team=team_names.get(team_id, f"Team {team_id}"),
+        opponent=opponent,
+        is_home=is_home,
+        p_no_play=0.03,
+        p_sub=0.07,
+        p_full=0.90,
+        lambda_goals=goal_rate,
+        lambda_assists=assist_rate,
+        p_clean_sheet=clean_sheet,
+        lambda_saves=3.0 if position == 1 else 0.0,
+        p_yellow_card=0.08,
+        p_red_card=0.001,
+        expected_bonus=max(0.05, min(0.5, float(player["selection_score"]) / 20)),
+        lambda_goals_conceded=0.8 + 0.2 * difficulty,
+    )
+
+
+def _clear_current_squad():
+    """Remove the active and persisted squad state."""
+    for key in SQUAD_SESSION_KEYS:
+        st.session_state.pop(key, None)
+    st.session_state.pop("confirm_clear_squad", None)
+
+    if SQUAD_FILE.exists():
+        SQUAD_FILE.unlink()
+
+    st.toast("Squad cleared.")
+
+
 def _render_squad_table():
     """Display squad as a table with prices and budget."""
     preds = st.session_state["squad_predictions"]
@@ -195,7 +401,6 @@ def _render_squad_table():
             st.metric("In The Bank", f"£{budget['bank']/10:.1f}m")
         with col3:
             st.metric("Total Budget", f"£{budget['total']/10:.1f}m")
-        st.markdown("---")
 
     rows = []
     for p in preds:
@@ -218,17 +423,34 @@ def _render_squad_table():
         df,
         use_container_width=True,
         hide_index=True,
+        height=36 * (len(df) + 1) + 3,
         column_config={
-            "Player": st.column_config.TextColumn("Player", help="Player name"),
-            "Pos": st.column_config.TextColumn("Pos", help="Position: GK, DEF, MID, or FWD"),
-            "Team": st.column_config.TextColumn("Team", help="Player's club"),
-            "Price": st.column_config.TextColumn("Price", help="Current price in millions (£). Total squad must be ≤ £100m"),
-            "vs": st.column_config.TextColumn("vs", help="Opponent team this gameweek"),
-            "Home": st.column_config.TextColumn("Home", help="🏠 = Home fixture, ✈️ = Away fixture. Home teams tend to score more"),
-            "P(play)": st.column_config.TextColumn("P(play)", help="Probability the player features in this match (any minutes). Based on minutes model"),
-            "λ Goals": st.column_config.TextColumn("λ Goals", help="Poisson rate for goals. λ=0.5 means ~39% chance of scoring. λ=1.0 means ~63% chance"),
-            "λ Assists": st.column_config.TextColumn("λ Assists", help="Poisson rate for assists. Higher = more likely to assist. Depends on creativity and opponent"),
-            "P(CS)": st.column_config.TextColumn("P(CS)", help="Probability of team keeping a clean sheet. Only gives FPL points if player plays 60+ mins. GK/DEF=4pts, MID=1pt"),
+            "Player": st.column_config.TextColumn("Player", help="Player name.", width="medium"),
+            "Pos": st.column_config.TextColumn(
+                "Pos", help="FPL position: goalkeeper, defender, midfielder, or forward.", width="small"
+            ),
+            "Team": st.column_config.TextColumn("Team", help="Player's current club.", width="medium"),
+            "Price": st.column_config.TextColumn(
+                "Price", help="Current FPL price in millions of pounds.", width="small"
+            ),
+            "vs": st.column_config.TextColumn(
+                "vs", help="Opponent in the next scheduled fixture.", width="medium"
+            ),
+            "Home": st.column_config.TextColumn(
+                "Home", help="🏠 means home; ✈️ means away.", width="small"
+            ),
+            "P(play)": st.column_config.TextColumn(
+                "P(play)", help="Estimated chance that the player appears in the match.", width="small"
+            ),
+            "λ Goals": st.column_config.TextColumn(
+                "λ Goals", help="Expected goals rate used by the sample simulation.", width="small"
+            ),
+            "λ Assists": st.column_config.TextColumn(
+                "λ Assists", help="Expected assists rate used by the sample simulation.", width="small"
+            ),
+            "P(CS)": st.column_config.TextColumn(
+                "P(CS)", help="Estimated probability of a clean sheet.", width="small"
+            ),
         },
     )
 

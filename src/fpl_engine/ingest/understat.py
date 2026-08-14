@@ -116,7 +116,7 @@ class UnderstatScraper:
 
         data = response.json()
         if cache_path:
-            cache_path.write_text(json.dumps(data), encoding="utf-8")
+            cache_path.write_text(json.dumps(data, indent=4), encoding="utf-8")
         return data
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=15))

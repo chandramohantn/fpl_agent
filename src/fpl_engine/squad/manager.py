@@ -116,7 +116,7 @@ class SquadManager:
         self.state.last_modified = datetime.now().isoformat()
 
         data = asdict(self.state)
-        self.squad_file.write_text(json.dumps(data, indent=2))
+        self.squad_file.write_text(json.dumps(data, indent=4))
         logger.info("Squad saved to %s", self.squad_file)
 
     def load(self) -> bool:

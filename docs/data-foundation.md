@@ -172,6 +172,28 @@ fpl/
         └── understat/players/season=2024-25/
 ```
 
+### 4.1 Data Folder Contents & Files Breakdown
+
+#### Raw Data Directory (`data/raw/`)
+
+| Folder Path | Format | Files Present | Stored Data & Description |
+|-------------|--------|---------------|---------------------------|
+| `data/raw/historical/{season}/` | CSV | `cleaned_players.csv` | Season summary for all registered players (IDs, names, positions, starting prices, total points, cumulative stats). |
+| `data/raw/historical/{season}/` | CSV | `fixtures.csv` | Full schedule & results per season (fixture IDs, teams, scorelines, FDR, kickoff times). |
+| `data/raw/historical/{season}/` | CSV | `teams.csv` | Team lookup metadata & strength ratings (home/away attack & defense ratings). |
+| `data/raw/historical/{season}/gws/` | CSV | `gw1.csv` ... `gw38.csv` | Per-gameweek individual performance logs (minutes, goals, assists, xG, xA, price, points, ICT index). |
+| `data/raw/understat/{year}/` | JSON | `league_data.json` | Raw Understat AJAX dump containing player xG, xA, npxG, xGChain, xGBuildup, shot counts, & key passes. |
+
+#### Processed Data Directory (`data/processed/`)
+
+| Folder Path | Format | Partitioning | File Name | Stored Data & Description |
+|-------------|--------|--------------|-----------|---------------------------|
+| `data/processed/players/` | Parquet | `season=YYYY-YY` | `players.parquet` | Cleaned master player dataset per season (ID, web name, position, team ID, price, status, news). |
+| `data/processed/gameweeks/` | Parquet | `season=YYYY-YY` | `gameweeks.parquet` | Granular per-player, per-gameweek time series (minutes, fantasy points, goals, assists, xG, xA, cards). |
+| `data/processed/fixtures/` | Parquet | `season=YYYY-YY` | `fixtures.parquet` | Cleaned fixture schedule and result status (teams, scores, FDR home/away, kickoff timestamps). |
+| `data/processed/teams/` | Parquet | `season=YYYY-YY` | `teams.parquet` | Team lookups & normalized attack/defense strength ratings. |
+| `data/processed/understat/players/` | Parquet | `season=YYYY-YY` | `understat_players.parquet` | Matched & processed Understat stats mapped to FPL player IDs (npxG/90, xGChain/90, xGBuildup/90). |
+
 ---
 
 ## 5. Data Sources

@@ -127,22 +127,7 @@ class LiveSeasonRefresher:
                 len(new_gws),
             )
 
-            if not new_gws and not force_understat:
-                logger.info("No new gameweeks to ingest")
-                return result
-
-            # 3. Fetch live GW data for each new gameweek
-            if new_gws:
-                gw_frames = await self._fetch_new_gameweeks(client, new_gws)
-                if gw_frames:
-                    new_data = pd.concat(gw_frames, ignore_index=True)
-                    result.new_gameweeks = new_gws
-                    result.total_new_rows = len(new_data)
-
-                    # 4. Append to store
-                    self._append_gameweeks(new_data, season)
-
-            # 5. Update snapshots (always, since prices/form change daily)
+            # Update player/team/fixture snapshots (always, since prices/form change daily)
             players_df = pd.DataFrame(bootstrap["elements"])
             teams_df = pd.DataFrame(bootstrap["teams"])
             self.store.save_players(players_df, season)
@@ -153,6 +138,10 @@ class LiveSeasonRefresher:
             fixtures_df = pd.DataFrame(fixtures_raw)
             self.store.save_fixtures(fixtures_df, season)
             result.fixtures_updated = len(fixtures_df)
+
+            if not new_gws and not force_understat:
+                logger.info("No new gameweeks to ingest. Player & fixture snapshots updated.")
+                return result
 
         # 6. Refresh Understat
         if new_gws or force_understat:

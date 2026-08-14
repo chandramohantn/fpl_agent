@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 import pandas as pd
+import yaml
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -34,8 +35,39 @@ logger = logging.getLogger(__name__)
 # We'll work from the project root
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
+PIPELINE_CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline.yaml"
 
 store = ParquetStore(base_dir=DATA_DIR / "processed")
+
+
+def load_pipeline_seasons(config_path: Path = PIPELINE_CONFIG_PATH) -> dict[str, list[str]]:
+    """Load the configured historical and Understat seasons."""
+    try:
+        with config_path.open(encoding="utf-8") as config_file:
+            config = yaml.safe_load(config_file)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Pipeline config not found: {config_path}. "
+            "Create it from config/pipeline.yaml."
+        ) from exc
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid YAML in pipeline config: {config_path}") from exc
+
+    if not isinstance(config, dict):
+        raise ValueError("Pipeline config must contain a YAML mapping.")
+
+    configured_seasons = {}
+    for source in ("historical", "understat"):
+        seasons = config.get(source, {}).get("seasons")
+        if not isinstance(seasons, list) or not seasons or not all(
+            isinstance(season, str) and season for season in seasons
+        ):
+            raise ValueError(
+                f"Config key {source}.seasons must be a non-empty list of season strings."
+            )
+        configured_seasons[source] = seasons
+
+    return configured_seasons
 
 
 async def ingest_fpl_api():
@@ -150,8 +182,8 @@ async def ingest_historical(seasons: list[str] | None = None):
     logger.info("Total historical GW rows: %d", total_gw_rows)
 
 
-async def ingest_understat(season: str = "2024-25"):
-    """Ingest Understat xG data."""
+async def ingest_understat(seasons: list[str]):
+    """Ingest Understat xG data for the configured seasons."""
     logger.info("")
     logger.info("=" * 60)
     logger.info("PHASE 3: Understat xG Data")
@@ -159,29 +191,34 @@ async def ingest_understat(season: str = "2024-25"):
 
     scraper = UnderstatScraper(cache_dir=DATA_DIR / "raw" / "understat")
 
-    # League-level player data
-    try:
-        players = await scraper.get_league_players(season)
-        logger.info("Understat players for %s: %d", season, len(players))
+    for season in seasons:
+        logger.info("--- Season %s ---", season)
 
-        players_df = pd.DataFrame(players)
-        store.save_understat_players(players_df, season)
+        # League-level player data
+        try:
+            players = await scraper.get_league_players(season)
+            logger.info("Understat players for %s: %d", season, len(players))
 
-        # Show top 10 by xG
-        players_df["xG"] = players_df["xG"].astype(float)
-        players_df["xA"] = players_df["xA"].astype(float)
-        top_xg = players_df.nlargest(10, "xG")[["player_name", "team_title", "xG", "xA", "games"]]
-        logger.info("Top 10 by xG:\n%s", top_xg.to_string(index=False))
+            players_df = pd.DataFrame(players)
+            store.save_understat_players(players_df, season)
 
-    except Exception as e:
-        logger.error("Understat league data failed: %s", e)
+            # Show top 10 by xG
+            players_df["xG"] = players_df["xG"].astype(float)
+            players_df["xA"] = players_df["xA"].astype(float)
+            top_xg = players_df.nlargest(10, "xG")[
+                ["player_name", "team_title", "xG", "xA", "games"]
+            ]
+            logger.info("Top 10 by xG:\n%s", top_xg.to_string(index=False))
 
-    # Team-level data
-    try:
-        teams = await scraper.get_league_teams(season)
-        logger.info("Understat teams: %d", len(teams))
-    except Exception as e:
-        logger.warning("Understat teams failed: %s", e)
+        except Exception as e:
+            logger.error("Understat league data for %s failed: %s", season, e)
+
+        # Team-level data
+        try:
+            teams = await scraper.get_league_teams(season)
+            logger.info("Understat teams for %s: %d", season, len(teams))
+        except Exception as e:
+            logger.warning("Understat teams for %s failed: %s", season, e)
 
 
 async def main():
@@ -189,6 +226,12 @@ async def main():
     logger.info("FPL Engine — Data Ingestion Pipeline")
     logger.info("Project root: %s", PROJECT_ROOT)
     logger.info("")
+
+    pipeline_seasons = load_pipeline_seasons()
+    historical_seasons = pipeline_seasons["historical"]
+    understat_seasons = pipeline_seasons["understat"]
+    logger.info("Historical seasons from %s: %s", PIPELINE_CONFIG_PATH, historical_seasons)
+    logger.info("Understat seasons from %s: %s", PIPELINE_CONFIG_PATH, understat_seasons)
 
     # Phase 1: FPL API
     try:
@@ -198,10 +241,10 @@ async def main():
         season = None
 
     # Phase 2: Historical
-    await ingest_historical(seasons=["2023-24", "2024-25"])
+    await ingest_historical(seasons=historical_seasons)
 
     # Phase 3: Understat
-    await ingest_understat("2024-25")
+    await ingest_understat(understat_seasons)
 
     # Summary
     logger.info("")

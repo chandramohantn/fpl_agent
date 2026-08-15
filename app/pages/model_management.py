@@ -1,5 +1,7 @@
 """Model Management page — retrain models, view metrics."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 import streamlit as st
@@ -7,6 +9,16 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PIPELINE_CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline.yaml"
+TRAINING_SCRIPT = PROJECT_ROOT / "scripts" / "train_models.py"
+MODEL_OPTIONS = {
+    "Minutes": "minutes",
+    "Goals": "goals",
+    "Assists": "assists",
+    "Clean Sheets": "clean_sheets",
+    "Saves": "saves",
+    "Cards": "cards",
+    "Bonus": "bonus",
+}
 
 
 def load_pipeline_config() -> tuple[dict[str, list[str]] | None, str | None]:
@@ -43,6 +55,63 @@ def find_stored_seasons(domain_dir: Path) -> list[str]:
     )
 
 
+def _run_training(
+    model_names: list[str],
+    training_seasons: list[str],
+    calibration_season: str,
+    test_season: str,
+) -> None:
+    """Run the real training script and present its result in the UI."""
+    if not model_names:
+        st.error("Choose at least one model to train.")
+        return
+    if not training_seasons:
+        st.error("Choose at least one training season.")
+        return
+    if calibration_season == test_season or {
+        calibration_season,
+        test_season,
+    }.intersection(training_seasons):
+        st.error("Training, calibration, and test seasons must not overlap.")
+        return
+    if not TRAINING_SCRIPT.exists():
+        st.error(f"Training script not found: {TRAINING_SCRIPT}")
+        return
+
+    command = [
+        sys.executable,
+        str(TRAINING_SCRIPT),
+        "--models",
+        *(MODEL_OPTIONS[name] for name in model_names),
+        "--train-seasons",
+        *training_seasons,
+        "--calibration-season",
+        calibration_season,
+        "--test-season",
+        test_season,
+    ]
+    with st.spinner("Training models. This can take a few minutes..."):
+        completed = subprocess.run(
+            command,
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    with st.expander("Training log", expanded=completed.returncode != 0):
+        st.code(output or "No output produced.")
+
+    if completed.returncode == 0:
+        st.success(
+            f"Trained and saved {len(model_names)} model(s). "
+            "Open Model Status to confirm the generated artifacts."
+        )
+    else:
+        st.error("Training failed. No success status has been reported.")
+
+
 def render():
     st.title("🔧 Model Management")
 
@@ -53,7 +122,7 @@ def render():
     with tab1:
         st.subheader("Trained Models")
 
-        models_dir = Path("models")
+        models_dir = PROJECT_ROOT / "models"
         model_info = [
             ("Minutes v2", "minutes_v2", "3-class classification (per position)",
              "DEF 79.6%, MID 77.9%, FWD 73.8%"),
@@ -73,18 +142,21 @@ def render():
 
         for name, folder, model_type, metric in model_info:
             model_path = models_dir / folder
-            exists = model_path.exists()
+            artifacts = sorted(model_path.glob("*.pkl")) if model_path.exists() else []
+            exists = bool(artifacts)
             status = "✅" if exists else "❌"
 
             with st.expander(f"{status} **{name}** — {model_type}"):
                 if exists:
-                    files = list(model_path.glob("*.pkl"))
                     st.markdown(f"**Metric:** {metric}")
-                    st.markdown(f"**Files:** {', '.join(f.name for f in files)}")
-                    size = sum(f.stat().st_size for f in files) / 1024
+                    st.markdown(f"**Files:** {', '.join(file.name for file in artifacts)}")
+                    size = sum(file.stat().st_size for file in artifacts) / 1024
                     st.markdown(f"**Size:** {size:.1f} KB")
+                    metrics_path = model_path / "metrics.json"
+                    if metrics_path.exists():
+                        st.caption(f"Training metrics: {metrics_path.read_text(encoding='utf-8')}")
                 else:
-                    st.warning("Model not trained yet. Use the Retrain tab.")
+                    st.warning("No trained model artifacts found. Use the Retrain tab.")
 
     # ─── Tab 2: Retrain ──────────────────────────────────────────────────
 
@@ -101,7 +173,14 @@ def render():
         training_seasons = st.multiselect(
             "Training seasons",
             available_seasons,
-            default=["2023-24", "2024-25"],
+            default=["2023-24"],
+            help="Must not overlap with calibration or test seasons.",
+        )
+        calibration_season = st.selectbox(
+            "Calibration season (Minutes model)",
+            available_seasons,
+            index=1,
+            help="Used for isotonic calibration of Minutes probabilities.",
         )
         test_season = st.selectbox(
             "Test season (for evaluation)",
@@ -114,47 +193,17 @@ def render():
         # Model selector
         models_to_train = st.multiselect(
             "Models to retrain",
-            ["Minutes", "Goals", "Assists", "Clean Sheets", "Saves", "Cards", "Bonus"],
-            default=["Minutes", "Goals", "Assists"],
+            list(MODEL_OPTIONS),
+            default=list(MODEL_OPTIONS),
         )
 
         st.markdown("---")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            n_estimators = st.number_input("Trees (n_estimators)", 100, 2000, 500, step=100)
-        with col2:
-            max_depth = st.number_input("Max depth", 3, 10, 6)
+        st.caption(
+            "Training uses the documented LightGBM hyperparameters and saves artifacts under `models/`."
+        )
 
         if st.button("🚀 Start Training", type="primary"):
-            progress = st.progress(0)
-            status_text = st.empty()
-
-            for i, model_name in enumerate(models_to_train):
-                status_text.text(f"Training {model_name}...")
-                progress.progress((i + 1) / len(models_to_train))
-
-                # In production, this would call the actual training functions:
-                # from fpl_engine.models.minutes import build_training_dataset
-                # dataset = build_training_dataset(store, seasons=training_seasons)
-                # ... train model ...
-
-            status_text.text("✅ Training complete!")
-            st.success(
-                f"Trained {len(models_to_train)} models on "
-                f"{', '.join(training_seasons)}. "
-                f"Evaluated on {test_season}."
-            )
-
-            # Show mock results
-            st.markdown("**Results:**")
-            results_data = {
-                "Model": models_to_train,
-                "Train seasons": [", ".join(training_seasons)] * len(models_to_train),
-                "Test season": [test_season] * len(models_to_train),
-                "Status": ["✅ Saved"] * len(models_to_train),
-            }
-            st.dataframe(results_data, hide_index=True)
+            _run_training(models_to_train, training_seasons, calibration_season, test_season)
 
     # ─── Tab 3: Data Status ──────────────────────────────────────────────
 

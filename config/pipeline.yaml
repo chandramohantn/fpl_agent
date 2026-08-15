@@ -1,0 +1,13 @@
+# Seasons to download and process when running scripts/run_pipeline.py.
+# Understat accepts the same FPL season format and stores each season separately.
+historical:
+  seasons:
+    - "2023-24"
+    - "2024-25"
+    - "2025-26"
+
+understat:
+  seasons:
+    - "2023-24"
+    - "2024-25"
+    - "2025-26"

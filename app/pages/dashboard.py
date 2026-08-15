@@ -51,6 +51,9 @@ def render():
         else:
             _render_squad_table()
 
+            with st.expander("Edit current squad"):
+                _render_squad_editor()
+
             with st.expander("Clear current squad"):
                 st.warning(
                     "This removes the squad, simulations, manual player inputs, and saved squad state."
@@ -371,6 +374,141 @@ def _build_sample_prediction(
         expected_bonus=max(0.05, min(0.5, float(player["selection_score"]) / 20)),
         lambda_goals_conceded=0.8 + 0.2 * difficulty,
     )
+
+
+def _render_squad_editor():
+    """Render controls for removing and adding current-season players."""
+    preds = st.session_state["squad_predictions"]
+    names = st.session_state.get("player_names", {})
+    prices = st.session_state.get("player_prices", {})
+    budget = st.session_state.get("squad_budget", {})
+    bank = budget.get("bank", SQUAD_BUDGET - sum(prices.get(p.element, 0) for p in preds))
+
+    st.caption(
+        "Changes use the current 2026–27 player pool and reset simulations and saved squad-management state."
+    )
+    remove_col, add_col = st.columns(2)
+    with remove_col:
+        st.markdown("**Remove player**")
+        remove_options = {
+            f"{names.get(p.element, f'#{p.element}')} · {p.position} · £{prices.get(p.element, 0) / 10:.1f}m": p.element
+            for p in preds
+        }
+        selected_label = st.selectbox("Current player", list(remove_options), key="dashboard_remove_player")
+        if st.button("Remove", key="dashboard_remove_button"):
+            _remove_dashboard_player(remove_options[selected_label])
+            st.rerun()
+
+    with add_col:
+        st.markdown("**Add player**")
+        try:
+            candidates, fixtures, team_names = _eligible_additions(preds, prices, bank)
+        except ValueError as exc:
+            st.warning(str(exc))
+            return
+
+        if not candidates:
+            st.info("Remove a player first, or free more budget, to add an eligible replacement.")
+            return
+
+        add_options = {
+            f"{player['web_name']} · {POSITION_NAMES[int(player['element_type'])]} · "
+            f"{team_names[int(player['team'])]} · £{player['now_cost'] / 10:.1f}m": player
+            for player in candidates
+        }
+        add_label = st.selectbox("Eligible current-season player", list(add_options), key="dashboard_add_player")
+        if st.button("Add", key="dashboard_add_button"):
+            _add_dashboard_player(add_options[add_label], fixtures, team_names)
+            st.rerun()
+
+
+def _eligible_additions(
+    preds: list[PlayerPrediction], prices: dict[int, int], bank: int
+) -> tuple[list[dict], pd.DataFrame, dict[int, str]]:
+    """Return players who can be added without violating FPL squad constraints."""
+    processed_dir = PROJECT_ROOT / "data" / "processed"
+    players_path = processed_dir / "players" / f"season={CURRENT_SEASON}" / "players.parquet"
+    teams_path = processed_dir / "teams" / f"season={CURRENT_SEASON}" / "teams.parquet"
+    fixtures_path = processed_dir / "fixtures" / f"season={CURRENT_SEASON}" / "fixtures.parquet"
+    if not all(path.exists() for path in (players_path, teams_path, fixtures_path)):
+        raise ValueError(
+            f"Current-season data for {CURRENT_SEASON} is missing. "
+            "Run `uv run python scripts/refresh.py` first."
+        )
+
+    players = pd.read_parquet(players_path).copy()
+    teams = pd.read_parquet(teams_path)
+    fixtures = pd.read_parquet(fixtures_path)
+    players["now_cost"] = pd.to_numeric(players["now_cost"], errors="coerce")
+    players["selection_score"] = (
+        pd.to_numeric(players["ep_next"], errors="coerce").fillna(0) * 5
+        + pd.to_numeric(players["points_per_game"], errors="coerce").fillna(0) * 2
+        + pd.to_numeric(players["form"], errors="coerce").fillna(0)
+    )
+    team_names = dict(zip(teams["id"].astype(int), teams["name"], strict=True))
+    selected_ids = {prediction.element for prediction in preds}
+    position_counts = {position: sum(p.position == position for p in preds) for position in POSITION_NAMES.values()}
+    team_counts = {team: sum(p.team == team for p in preds) for team in team_names.values()}
+
+    eligible = players[
+        players["can_select"].fillna(False)
+        & players["status"].eq("a")
+        & players["element_type"].isin(POSITION_QUOTAS)
+        & players["now_cost"].gt(0)
+        & players["now_cost"].le(bank)
+        & ~players["id"].isin(selected_ids)
+    ]
+    candidates = []
+    for player in eligible.sort_values(["selection_score", "web_name"], ascending=[False, True]).to_dict("records"):
+        position = POSITION_NAMES[int(player["element_type"])]
+        team_name = team_names[int(player["team"])]
+        if position_counts[position] < POSITION_QUOTAS[int(player["element_type"])] and team_counts.get(team_name, 0) < MAX_PER_CLUB:
+            candidates.append(player)
+    return candidates, fixtures, team_names
+
+
+def _remove_dashboard_player(element: int) -> None:
+    """Remove a player and invalidate data derived from the previous squad."""
+    st.session_state["squad_predictions"] = [
+        prediction for prediction in st.session_state["squad_predictions"] if prediction.element != element
+    ]
+    names = dict(st.session_state.get("player_names", {}))
+    prices = dict(st.session_state.get("player_prices", {}))
+    names.pop(element, None)
+    prices.pop(element, None)
+    st.session_state["player_names"] = names
+    st.session_state["player_prices"] = prices
+    _finalize_squad_edit()
+
+
+def _add_dashboard_player(player: dict, fixtures: pd.DataFrame, team_names: dict[int, str]) -> None:
+    """Add an eligible player and invalidate data derived from the previous squad."""
+    prediction = _build_sample_prediction(player, fixtures, team_names)
+    st.session_state["squad_predictions"] = [*st.session_state["squad_predictions"], prediction]
+    names = dict(st.session_state.get("player_names", {}))
+    prices = dict(st.session_state.get("player_prices", {}))
+    names[prediction.element] = str(player["web_name"])
+    prices[prediction.element] = int(player["now_cost"])
+    st.session_state["player_names"] = names
+    st.session_state["player_prices"] = prices
+    _finalize_squad_edit()
+
+
+def _finalize_squad_edit() -> None:
+    """Recalculate budget and discard state that belongs to the prior squad."""
+    preds = st.session_state["squad_predictions"]
+    prices = st.session_state["player_prices"]
+    spent = sum(prices.get(prediction.element, 0) for prediction in preds)
+    st.session_state["squad_budget"] = {
+        "total": SQUAD_BUDGET,
+        "spent": spent,
+        "bank": SQUAD_BUDGET - spent,
+    }
+    st.session_state.pop("sim_results", None)
+    st.session_state.pop("player_contexts", None)
+    st.session_state.pop("squad_manager", None)
+    if SQUAD_FILE.exists():
+        SQUAD_FILE.unlink()
 
 
 def _clear_current_squad():

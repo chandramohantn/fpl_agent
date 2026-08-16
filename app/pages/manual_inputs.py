@@ -53,8 +53,11 @@ def render():
             }
 
             chance_of_playing = st.slider(
-                "Chance of playing (%)", 0, 100, 100,
-                help="0 = definitely out, 100 = definitely playing"
+                "Chance of playing (%)",
+                0,
+                100,
+                100,
+                help="0 = definitely out, 100 = definitely playing",
             )
 
             returning_from_injury = st.checkbox("Returning from injury")
@@ -66,8 +69,7 @@ def render():
                     "Weeks out", min_value=0.0, max_value=30.0, value=2.0, step=0.5
                 )
                 fitness = st.slider(
-                    "Fitness level", 0.0, 1.0, 0.7,
-                    help="0.0 = unfit, 1.0 = fully match fit"
+                    "Fitness level", 0.0, 1.0, 0.7, help="0.0 = unfit, 1.0 = fully match fit"
                 )
 
         with col2:
@@ -75,20 +77,29 @@ def render():
 
             days_since = st.number_input(
                 "Days since last match (any competition)",
-                min_value=0.0, max_value=14.0, value=7.0, step=0.5,
-                help="Include midweek CL/cup/international matches"
+                min_value=0.0,
+                max_value=14.0,
+                value=7.0,
+                step=0.5,
+                help="Include midweek CL/cup/international matches",
             )
 
             minutes_last = st.number_input(
                 "Minutes played in last match",
-                min_value=0, max_value=120, value=0, step=15,
-                help="0 = didn't play, 90 = full match"
+                min_value=0,
+                max_value=120,
+                value=0,
+                step=15,
+                help="0 = didn't play, 90 = full match",
             )
 
             important_match_days = st.number_input(
                 "Important match in how many days?",
-                min_value=0.0, max_value=14.0, value=0.0, step=1.0,
-                help="0 = no upcoming important match"
+                min_value=0.0,
+                max_value=14.0,
+                value=0.0,
+                step=1.0,
+                help="0 = no upcoming important match",
             )
 
             important_match_type = ""
@@ -114,7 +125,10 @@ def render():
                 source="manual",
             )
             st.session_state["player_contexts"][selected_id] = ctx
+            st.session_state.pop("sim_results", None)
+            st.session_state.pop("override_effects", None)
             st.success(f"✅ Context saved for {names[selected_id]}")
+            st.info("Run simulations again on the Dashboard to apply this override.")
 
     # ─── Tab 2: View all overrides ───────────────────────────────────────
 
@@ -142,4 +156,6 @@ def render():
 
                     if st.button("🗑️ Remove", key=f"remove_{eid}"):
                         del st.session_state["player_contexts"][eid]
+                        st.session_state.pop("sim_results", None)
+                        st.session_state.pop("override_effects", None)
                         st.rerun()

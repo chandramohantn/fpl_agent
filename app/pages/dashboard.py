@@ -7,6 +7,7 @@ import pandas as pd
 import streamlit as st
 from fpl_engine.simulation.overrides import OverrideEffect, apply_manual_overrides
 from fpl_engine.simulation.player_sim import PlayerPrediction, simulate_player_match_batch
+from fpl_engine.squad.formation import recommend_formations
 from fpl_engine.squad.manager import SQUAD_FILE
 
 SQUAD_SESSION_KEYS = (
@@ -30,7 +31,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 def render():
     st.title("🏠 Dashboard")
 
-    tab1, tab2, tab3 = st.tabs(["Squad Overview", "Simulations", "Captain Comparison"])
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Squad Overview", "Simulations", "Captain Comparison", "Formation Recommendation"]
+    )
 
     # ─── Tab 1: Squad Overview ───────────────────────────────────────────
 
@@ -98,6 +101,16 @@ def render():
 
         if "sim_results" in st.session_state:
             _render_captain_comparison()
+        else:
+            st.info("Run simulations first (Simulations tab).")
+
+    # ─── Tab 4: Formation Recommendation ────────────────────────────────
+
+    with tab4:
+        st.subheader("Best Formation")
+
+        if "sim_results" in st.session_state:
+            _render_formation_recommendation()
         else:
             st.info("Run simulations first (Simulations tab).")
 
@@ -899,6 +912,84 @@ def _render_simulation_results():
             ),
         },
     )
+
+
+def _render_formation_recommendation():
+    """Recommend the highest-scoring valid starting formation."""
+    predictions = st.session_state["squad_predictions"]
+    results = st.session_state["sim_results"]
+    names = st.session_state.get("player_names", {})
+    positions = {prediction.element: prediction.position for prediction in predictions}
+    recommendations = recommend_formations(predictions, results)
+
+    if not recommendations:
+        st.warning("The current squad does not contain enough players for a valid FPL formation.")
+        return
+
+    best = recommendations[0]
+    formation_options = [recommendation.formation for recommendation in recommendations]
+    selected_formation = st.selectbox(
+        "Formation to use",
+        formation_options,
+        key="formation_recommendation_choice",
+        help="The top option is the model recommendation. Choose any other legal formation to overrule it.",
+    )
+    selected = next(
+        recommendation
+        for recommendation in recommendations
+        if recommendation.formation == selected_formation
+    )
+    is_manual_override = selected.formation != best.formation
+    captain_name = names.get(selected.captain, f"#{selected.captain}")
+    st.success(
+        f"🎯 **{'Selected' if is_manual_override else 'Recommended'} formation: "
+        f"{selected.formation}** — expected XI points: **{selected.expected_points:.2f}**"
+    )
+    st.caption(
+        f"Captain suggestion: {captain_name}. This ranks every legal formation using "
+        "the expected points from the latest simulation."
+    )
+    if is_manual_override:
+        st.info(
+            f"Manual formation override active. It is {selected.expected_points - best.expected_points:.2f} "
+            "expected points below the top-ranked formation."
+        )
+
+    st.markdown("**Starting XI**")
+    starting_rows = [
+        {
+            "Player": f"{names.get(element, f'#{element}')} {'👑 (C)' if element == selected.captain else ''}",
+            "Position": positions.get(element, ""),
+            "xPts": f"{results[element]['mean']:.2f}",
+        }
+        for element in selected.starting
+    ]
+    st.dataframe(starting_rows, hide_index=True, use_container_width=True)
+
+    st.markdown("**Bench order**")
+    bench_rows = [
+        {
+            "Priority": priority,
+            "Player": names.get(element, f"#{element}"),
+            "Position": positions.get(element, ""),
+            "xPts": f"{results[element]['mean']:.2f}",
+        }
+        for priority, element in enumerate(selected.bench, start=1)
+    ]
+    st.dataframe(bench_rows, hide_index=True, use_container_width=True)
+
+    st.markdown("**Other legal formations**")
+    alternatives = pd.DataFrame(
+        [
+            {
+                "Formation": recommendation.formation,
+                "Expected XI points": f"{recommendation.expected_points:.2f}",
+                "Difference from best": f"{recommendation.expected_points - best.expected_points:+.2f}",
+            }
+            for recommendation in recommendations
+        ]
+    )
+    st.dataframe(alternatives, hide_index=True, use_container_width=True)
 
 
 def _render_captain_comparison():

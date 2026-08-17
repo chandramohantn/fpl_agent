@@ -61,7 +61,7 @@ def _render_starting_xi():
     # Formation selector
     formation = st.selectbox(
         "Formation",
-        ["3-5-2", "3-4-3", "4-5-1", "4-4-2", "4-3-3", "5-4-1", "5-3-2"],
+        ["3-5-2", "3-4-3", "4-5-1", "4-4-2", "4-3-3", "5-4-1", "5-3-2", "5-2-3"],
         index=4,  # 4-3-3 default
     )
     n_def, n_mid, n_fwd = (int(x) for x in formation.split("-"))
